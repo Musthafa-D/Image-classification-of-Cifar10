@@ -1,0 +1,60 @@
+optimized:
+  learning_rate_exp:
+    - float
+    - -4
+    - -3
+  learning_rate_exp_l:
+    - float
+    - -3
+    - -1.5
+  weight_decay_rate:
+    - float
+    - -4
+    - -3
+  num_blocks:
+    - int
+    - 7
+    - 10
+
+learning:
+  num_epochs: 130
+  testevery: 1
+  learning_rate_decay: 0.1
+  scheduler_name: MultiStepLR
+  scheduler_step_1: 100
+  scheduler_step_2: 110
+  scheduler_step_3: 120
+  # learning_rate_exp: -3.515778767876511
+  # weight_decay_rate: -3.5163266016169556
+  criterion: CrossEntropyLoss
+  optimizer: RAdam
+
+data:
+  worker: 0
+  path: Datasets
+  dataset: cifar10
+  task: classify
+  batch_size: 64
+  scaler: '01'
+  shuffle_train: True
+  augmentation:
+    - RandomResizedCrop:
+        - 32
+    - RandomRotation:
+        - 5
+
+study:   
+  study_name: Classifier
+  optimization_target: TestAcc
+  number_of_trials: 15
+  direction: maximize
+  task: classify
+    
+network:
+  filter_growth_rate: 2
+  dropout_rate: 0.2
+  final_channel: 12
+  activation_function: RReLU
+  initial_out_channels: 32
+  final_layer: 'nlrl'
+  # num_blocks: 8

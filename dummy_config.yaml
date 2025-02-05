@@ -1,0 +1,36 @@
+learning:
+  num_epochs: 130
+  testevery: 1
+  learning_rate_decay: 0.1
+  scheduler_name: MultiStepLR
+  scheduler_step_1: 100
+  scheduler_step_2: 110
+  scheduler_step_3: 120
+  learning_rate_exp: -3.8086225035002195
+  learning_rate_exp_l: -2.291846707594099
+  weight_decay_rate: -3.165851444901016
+  criterion: CrossEntropyLoss
+  optimizer: RAdam
+
+data:
+  worker: 0
+  path: Datasets
+  dataset: cifar10
+  task: classify
+  batch_size: 64
+  scaler: '01'
+  shuffle_train: True
+  augmentation:
+    - RandomHorizontalFlip
+    - RandomPerspective
+    - RandomRotation:
+        - 5
+    
+network:
+  filter_growth_rate: 2
+  dropout_rate: 0.2
+  final_channel: 12
+  activation_function: RReLU
+  initial_out_channels: 64
+  final_layer: 'linear' # only 'linear', or 'nlrl'.
+  num_blocks: 7

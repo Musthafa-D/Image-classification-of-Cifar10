@@ -1,62 +1,180 @@
-# importing the necessary library files
-import torch.nn as nn
-import torch.nn.functional as F
-
-# Defining a class for CNN model
-
-
-class CNN(nn.Module):
-    def __init__(self):
-        super(CNN, self).__init__()
-
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(128)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(256)
-        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm2d(512)
-        self.conv5 = nn.Conv2d(512, 1024, kernel_size=3, padding=1)
-        self.bn5 = nn.BatchNorm2d(1024)
-        self.conv6 = nn.Conv2d(1024, 2048, kernel_size=3, padding=1)
-        self.bn6 = nn.BatchNorm2d(2048)
-        self.conv7 = nn.Conv2d(2048, 10, kernel_size=1)
-
-    def forward(self, x):
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.max_pool2d(x, 2)
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.max_pool2d(x, 2)
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = F.max_pool2d(x, 2)
-        x = F.relu(self.bn4(self.conv4(x)))
-        x = F.max_pool2d(x, 2)
-        x = F.relu(self.bn5(self.conv5(x)))
-        x = F.max_pool2d(x, 2)
-        x = F.relu(self.bn6(self.conv6(x)))
-        x = self.conv7(x)
-        #x = F.max_pool2d(x, kernel_size=x.size()[2:])
-        x = x.view(x.size(0), -1)
-        return x
-
-# Defining a class for LNN model
+import torch
+from ccbdl.network.base import BaseNetwork
+from ccbdl.utils.logging import get_logger
+from ccbdl.network.nlrl import NLRL_AO, InverseSigmoid
 
 
-class FNN(nn.Module):
-    def __init__(self):
-        super(FNN, self).__init__()
-        self.fc1 = nn.Linear(32*32*3, 256)
-        self.fc2 = nn.Linear(256, 128)
-        self.fc3 = nn.Linear(128, 10)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(p=0.2)
+class CNN(BaseNetwork):
+    def __init__(self,
+                 in_channels: int,
+                 name: str,
+                 initial_out_channels: int, 
+                 filter_growth_rate: float, 
+                 dropout_rate: float, 
+                 num_blocks: int, 
+                 final_layer: str, 
+                 final_channel: int,
+                 activation_function):
+        """
+        init function of CNN model
+        
+        Args:
+            name : str
+                some random name for the classifier.  
+            
+            dropout_rate : float
+                to determine the dropout rate.
+                
+                (designed for the values from 0.1 to 0.5, above 0.5 
+                 the model might learn less features)
+            
+            initial_out_channels : int
+                number of output feature maps.
+                
+                (designed for the values of 16, 32, 64, and 128
+                 above 128 the model's complexity increases')
+            
+            filter_growth_rate : float
+                scaling factor that dictates how the number of
+                filters or channels increases or decreases as you 
+                go deeper into the network.
+                
+                (designed for the values from 0.5 to 2, above 2
+                 the model's complexity increases')
+            
+            num_blocks : int
+                number of layers required to build the network.
+            
+            final_layer: string
+                to determine which final layer to be used
+                
+                (designed for the layers of linear or nlrl_ao)
+            
+            final_channel: int
+                the input features to the final_layer
+                
+                (designed for any int values above 0 to 32)
+            
+            activation_function:
+                the activation function that is used in the 
+                conv blocks after batchnorm
+                
+                (eg: ReLU, SiLU, LeakyReLU, etc.)
 
-    def forward(self, x):
-        x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.relu(self.fc2(x))
-        x = self.dropout(x)
-        x = self.fc3(x)
-        return x
+        Returns
+            None.
+        """
+        super().__init__(name)
+
+        self.logger = get_logger()
+        self.logger.info("creating cnn network.")
+
+        self.model = torch.nn.Sequential()
+        act = getattr(torch.nn, activation_function)
+
+        for idx in range(num_blocks):
+            if idx % 3 == 0:
+                out_channels = int(initial_out_channels * filter_growth_rate)
+                initial_out_channels *= filter_growth_rate
+            self.model.append(ConvBlock(in_channels,
+                                        out_channels,
+                                        5 if idx == 0 else 3,
+                                        0 if idx == 0 else 1,
+                                        act))
+            if idx % 4 ==0:
+                self.model.append(torch.nn.Dropout2d(p=dropout_rate))
+            if idx == num_blocks // 2:
+                self.model.append(torch.nn.MaxPool2d(2))
+            in_channels = out_channels
+
+        self.model.append(ConvBlock(in_channels, 64, 3, 0, act))
+        self.model.append(ConvBlock(64, 48, 3, 0, act))
+        self.model.append(ConvBlock(48, 32, 3, 0, act))
+        self.model.append(torch.nn.AdaptiveMaxPool2d(4))
+        self.model.append(torch.nn.Conv2d(32, final_channel, 4))
+        self.model.append(torch.nn.Flatten())
+        self.model.append(torch.nn.Sigmoid())
+        
+        if final_layer.lower() == 'linear':
+            self.model.append(torch.nn.Linear(final_channel, 10))
+        elif final_layer.lower() == 'nlrl':
+            self.model.append(NLRL_double(final_channel, 10))
+            self.model.append(InverseSigmoid())
+        else:
+            raise ValueError(
+                f"Invalid value for final_layer: {final_layer}, it should be 'linear', or 'nlrl'")
+
+    def forward(self, ins):
+        return self.model(ins)
+
+
+class ConvBlock(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, padding, act):
+        super(ConvBlock, self).__init__()
+        self.sequence = torch.nn.Sequential(torch.nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding),
+                                            torch.nn.BatchNorm2d(out_channels),
+                                            act())
+    
+    def forward(self, ins):
+        return self.sequence(ins)
+
+
+class FNN(BaseNetwork):
+    def __init__(self, name, num_layers):
+        """
+        init function of FNN model
+        
+        Args:
+            name : String
+                some random name for the classifier.   
+                
+            num_layers : Int
+                number of layers required to build the network.
+
+        Returns
+            None.
+
+        """
+        super().__init__(name)
+
+        self.logger = get_logger()
+        self.logger.info("creating fnn network.")
+
+        self.model = torch.nn.ModuleList()
+        input_size = 32 * 32 * 3
+        layer_sizes = [1024, 512, 256, 128, 10]
+
+        for idx in range(num_layers):
+            self.model.append(FNNBlock(input_size,
+                                       layer_sizes[idx]))
+            
+            input_size = layer_sizes[idx]
+            
+        self.model.append(torch.nn.Linear(input_size, layer_sizes[-1]))
+    
+    def forward(self, ins):
+        for module in self.model:
+            ins = module(ins)
+        return ins
+    
+    
+class FNNBlock(torch.nn.Module):
+    def __init__(self, in_features, out_features):
+        super(FNNBlock, self).__init__()
+        self.sequence = torch.nn.Sequential(torch.nn.Linear(in_features, out_features),
+                                            torch.nn.ReLU())
+    
+    def forward(self, ins):
+        return self.sequence(ins)
+
+
+class NLRL_double(NLRL_AO):
+    def __init__(self, in_features, out_features):
+        super(NLRL_double, self).__init__(in_features, out_features)
+        
+        self.register_parameter("negation", torch.nn.Parameter(
+            (torch.rand(1, in_features, out_features).double()-0.5)*1))
+        self.register_parameter("relevancy", torch.nn.Parameter(
+            (torch.rand(1, in_features, out_features).double()-0.5)*1))
+        self.register_parameter("selection", torch.nn.Parameter((torch.rand(1, out_features).double()-0.5)*1))
+        

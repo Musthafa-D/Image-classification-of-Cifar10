@@ -1,0 +1,31 @@
+learning:
+  num_epochs: 1
+  testevery: 1
+  cnn_model: 'rgb'
+
+data:
+  worker: 0
+  path: Datasets
+  dataset: mnist
+  task: diffusion # Just for plotting big plots, nothing else and it doens't have default plots that's why
+  batch_size: 64
+  scaler: '01'
+  shuffle_train: True
+    
+network_nlrl:
+  filter_growth_rate: 2
+  dropout_rate: 0.2
+  final_channel: 8
+  activation_function: RReLU
+  initial_out_channels: 32
+  final_layer: 'nlrl' # only 'linear', or 'nlrl'.
+  num_blocks: 3
+
+network_linear:
+  filter_growth_rate: 2
+  dropout_rate: 0.2
+  final_channel: 8
+  activation_function: RReLU
+  initial_out_channels: 32
+  final_layer: 'linear' # only 'linear', or 'nlrl'.
+  num_blocks: 3

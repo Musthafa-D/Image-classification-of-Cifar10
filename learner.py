@@ -1,79 +1,204 @@
-# Importing the necessary libraries and modules
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim import Adam
-from helpers import DataStorage, FigureStorage
+import ccbdl
+import os
+from plots import Accuracy_plot, Attribution_plots, Learning_rate_plot, Tsne_plot, Softmax_plot, TimePlot, Loss_plot, Precision_plot, Recall_plot, F1_plot, Hist_plot
+from ccbdl.learning.classifier import BaseClassifierLearning
+from ccbdl.utils import DEVICE
+import sys
+import time
 
 
-# Initialization, setting up the model, loss criterion, optimizer, and other important parameters
-class Learner:
-    def __init__(self, learning_rate, optimizer, model, device, train_loader, test_loader, epochs, model_name, result_folder, **kwargs):
-        self.device = device
-        self.learning_rate = learning_rate
+class Learner(BaseClassifierLearning):
+    def __init__(self,
+                 result_folder,
+                 model,
+                 train_data,
+                 test_data,
+                 val_data,
+                 config,
+                 network_config,
+                 logging):
+        """
+        init function of the learner class.
+        
+        Args:
+            model : The network that you use.
+                --> Example CNN, FNN, etc.
+            
+            train_data, test_data val_data: Respective 
+            train, test data and val_data.
+                --> Example like Cifar10's train
+                    and test data.
+
+        Returns
+            None.
+        """
+        super(Learner, self).__init__(train_data, test_data,
+                                      val_data, result_folder, config, logging=logging)
+        self.device = DEVICE
+        print(self.device)
+        
         self.model = model
-        self.criterion = nn.CrossEntropyLoss().to(self.device)
-        if optimizer.lower() == 'sgd':
-            self.optimizer = optim.SGD(
-                self.model.parameters(), lr=self.learning_rate, **kwargs)
-        elif optimizer.lower() == 'adam':
-            self.optimizer = Adam(self.model.parameters(),
-                                  lr=self.learning_rate, **kwargs)
+        self.learning_rate = 10**self.learning_rate_exp
+        self.learning_rate_l = 10**self.learning_rate_exp_l
+        
+        self.figure_storage.dpi=200
+        
+        if self.weight_decay_rate == 0:
+            self.weight_decay = 0
         else:
-            raise AttributeError("Choose SGD or ADAM as optimiser")
+            self.weight_decay = 10**self.weight_decay_rate
+        
+        self.learner_config = config
+        self.network_config = network_config
 
-        # Store additional parameters in an instance variable
-        self.additional_params = kwargs
+        self.criterion = getattr(torch.nn, self.criterion)().to(self.device)
+        
+        # Get the last layer's name
+        last_layer_name_parts = list(self.model.named_parameters())[-1][0].split('.')
+        last_layer_name = last_layer_name_parts[0] + '.' + last_layer_name_parts[1]
+        # print("Last layer name:", last_layer_name)
+        
+        # Separate out the parameters based on the last layer's name
+        fc_params = [p for n, p in self.model.named_parameters() if last_layer_name + '.' in n]  # Parameters of the last layer
+        rest_params = [p for n, p in self.model.named_parameters() if not last_layer_name + '.' in n]  # Parameters of layers before the last layer
 
-        self.train_loader = train_loader
-        self.test_loader = test_loader
-        self.epochs = epochs
-        self.model_name = model_name
+        self.optimizer = getattr(torch.optim, self.optimizer)(
+            rest_params, lr=self.learning_rate, weight_decay=self.weight_decay)
+        
+        self.optimizer_fc = torch.optim.Adam(fc_params, lr=self.learning_rate_l)
+        
+        # print("FC Params:")
+        # for p in fc_params:
+        #     print(p.shape)
+        # print("\nRest Params:")
+        # for p in rest_params:
+        #     print(p.shape)
+        
+        self.scheduler = getattr(torch.optim.lr_scheduler, self.scheduler_name)(
+            self.optimizer, 
+            milestones=[self.scheduler_step_1,self.scheduler_step_2,self.scheduler_step_3], 
+            gamma=self.learning_rate_decay)
+        
+        self.scheduler_fc = getattr(torch.optim.lr_scheduler, self.scheduler_name)(
+            self.optimizer_fc, 
+            milestones=[self.scheduler_step_1,self.scheduler_step_2,self.scheduler_step_3], 
+            gamma=self.learning_rate_decay)
+
         self.result_folder = result_folder
-        self.data_storage = DataStorage()
-        self.figure_storage = FigureStorage(self.result_folder)
 
-    # Trains the model for one epoch and returns train_accuracy and train_loss
-    def train_one_epoch(self):
+        # if sys.platform == "linux":
+        self.plotter.register_default_plot(TimePlot(self))
+        self.plotter.register_default_plot(Accuracy_plot(self))
+        self.plotter.register_default_plot(Precision_plot(self))
+        self.plotter.register_default_plot(Recall_plot(self))
+        self.plotter.register_default_plot(F1_plot(self))
+        
+        if sys.platform == "win32":
+            self.plotter.register_default_plot(Attribution_plots(self)) 
+            
+        self.plotter.register_default_plot(Loss_plot(self))
+        self.plotter.register_default_plot(Learning_rate_plot(self))
+        
+        if sys.platform == "win32":
+            self.plotter.register_default_plot(Softmax_plot(self))
+            
+        #if self.network_config["final_layer"] == 'nlrl':
+            #self.plotter.register_default_plot(Hist_plot(self))
+            
+        if sys.platform == "win32":
+            self.plotter.register_default_plot(Tsne_plot(self))
+
+        self.parameter_storage.store(self)
+        self.parameter_storage.write_tab(self.model.count_parameters(), "number of parameters: ")
+        self.parameter_storage.write_tab(self.model.count_learnable_parameters(), 
+                                         "number of learnable parameters: ")
+        
+        self.initial_save_path = os.path.join(self.result_folder, 'net_initial.pt')
+        
+        # for name, param in model.named_parameters():
+        #     print(name)
+        
+        # Replace DataStorage store method with store_new for calculating correct a_train_Acc and a_train_loss
+        self.data_storage.store = self.store_new
+
+    def _train_epoch(self, train=True):
+        if self.logging:
+            self.logger.info("started epoch %i." % self.epoch)
+        
+        if self.epoch == 0:
+            torch.save({'epoch': self.epoch,
+                        'batch': 0,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'optimizer_fc_dict': self.optimizer_fc.state_dict()},
+                       self.initial_save_path)
+
         self.model.train()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-        for i, data in enumerate(self.train_loader):
+
+        for i, data in enumerate(self.train_data):            
             inputs, labels = data
-            inputs, labels = inputs.to(self.device), labels.to(self.device)
+            inputs, labels = inputs.to(
+                self.device), labels.to(self.device).long()
 
             self.optimizer.zero_grad()
+            self.optimizer_fc.zero_grad()
 
-            outputs = self.model(inputs)
-            loss = self.criterion(outputs, labels)
-            loss.backward()
-            self.optimizer.step()
+            outputs = self._classify(inputs)
 
-            running_loss += loss.item()
+            self.train_loss = self.criterion(outputs, labels)
+
+            if train:
+                self.train_loss.backward()
+                self.optimizer.step()
+                self.optimizer_fc.step()
 
             _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            #self.batch += 1
+            self.train_accuracy = sum((predicted == labels)/len(inputs))*100
+            
+            _, precision, recall, f1 = ccbdl.evaluation.plotting.classify.get_classification_scores(
+            predicted, labels)
+            
+            self.train_precision = precision
+            self.train_recall = recall
+            self.train_f1 = f1
 
-        train_accuracy = 100 * correct / total
-        train_loss = running_loss / (i + 1)
-        return train_accuracy, train_loss
+            self.data_storage.store([self.epoch, self.batch, self.train_loss,
+                                    self.train_accuracy, self.test_loss, self.test_accuracy])
+            self.data_storage.dump_store(
+                "train_predictions", predicted.detach().cpu())
+            self.data_storage.dump_store("train_labels", labels.detach().cpu())
+            self.data_storage.dump_store("train_prec", self.train_precision)
+            self.data_storage.dump_store("train_rec", self.train_recall)
+            self.data_storage.dump_store("train_f1s", self.train_f1)
+            self.data_storage.dump_store("test_prec", self.test_precision)
+            self.data_storage.dump_store("test_rec", self.test_recall)
+            self.data_storage.dump_store("test_f1s", self.test_f1)
 
-    # Test the model for one epoch and returns test_accuracy and test_loss
-    def test_one_epoch(self):
+            if train:
+                self.batch += 1  
+                
+                # self.data_storage.dump_store("train_inputs", inputs)
+                # self.data_storage.dump_store("train_actual_label", labels)
+
+                self.data_storage.dump_store(
+                    "learning_rate", self.optimizer.param_groups[0]['lr'])
+                self.data_storage.dump_store(
+                    "learning_rate_l", self.optimizer_fc.param_groups[0]['lr'])
+
+    def _test_epoch(self):        
         self.model.eval()
+
         running_loss = 0.0
         correct = 0
         total = 0
         with torch.no_grad():
-            for i, data in enumerate(self.test_loader):
+            for i, data in enumerate(self.test_data):
                 images, labels = data
-                images, labels = images.to(self.device), labels.to(self.device)
-                outputs = self.model(images)
+                images, labels = images.to(
+                    self.device), labels.to(self.device).long()
+                
+                outputs = self._classify(images)
 
                 loss = self.criterion(outputs, labels)
                 running_loss += loss.item()
@@ -81,168 +206,202 @@ class Learner:
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
+                
+                _, precision, recall, f1 = ccbdl.evaluation.plotting.classify.get_classification_scores(
+                predicted, labels)
 
-        test_accuracy = 100 * correct / total
-        test_loss = running_loss / (i + 1)
-        return test_accuracy, test_loss
+                
+                self.data_storage.dump_store(
+                    "test_predictions", predicted.detach().cpu())
+                self.data_storage.dump_store(
+                    "test_labels", labels.detach().cpu())
+                
+                # self.data_storage.dump_store("test_inputs", images)
+                # self.data_storage.dump_store("test_actual_label", labels)
 
-    # Calls the plot function to visualize the training and testing accuracies and losses
+        self.test_accuracy = 100 * correct / total
+        self.test_loss = running_loss / (i + 1)
+        self.test_precision = precision
+        self.test_recall = recall
+        self.test_f1 = f1
+
+    def _validate_epoch(self):
+        pass
+
+    def _classify(self, ins):
+        return self.model(ins)
+
+    def _update_best(self):
+        if self.test_accuracy > self.best_values["TestAcc"]:
+            self.best_values = {"Epoch":           self.epoch,
+                                "TestLoss":        self.test_loss,
+                                "TestAcc":         self.test_accuracy,
+                                "TrainLoss":       self.train_loss.item(),
+                                "TrainAcc":        self.train_accuracy.item(),
+                                "Batch":           self.batch}
+
+            self.best_state_dict = self.model.state_dict()
+            self.best_optimizer_dict = self.optimizer.state_dict()
+            self.best_optimizer_fc_dict = self.optimizer_fc.state_dict()
+
     def evaluate(self):
-        self.plot()
+        if self.logging:
+            self.logger.info("evaluation")
 
-    def store(self):
-        train_accuracy, train_loss = self.train_one_epoch()
-        test_accuracy, test_loss = self.test_one_epoch()
+        self.end_values = {"Epoch":           self.epoch,
+                           "TestLoss":        self.test_loss,
+                           "TestAcc":         self.test_accuracy,
+                           "TrainLoss":       self.train_loss.item(),
+                           "TrainAcc":        self.train_accuracy.item(),
+                           "Batch":           self.batch}
 
-        self.data_storage.store(
-            [train_loss, train_accuracy, test_loss, test_accuracy])
+    def _hook_every_epoch(self):
+        if self.epoch == 0:
+            self.init_values = {"Epoch":           self.epoch,
+                                "TestLoss":        self.test_loss,
+                                "TestAcc":         self.test_accuracy,
+                                "TrainLoss":       self.train_loss.item(),
+                                "TrainAcc":        self.train_accuracy.item(),
+                                "Batch":           self.batch}
+            
+            torch.save({'epoch': self.epoch,
+                        'batch': self.init_values["Batch"],
+                        'test_acc': self.init_values["TestAcc"],
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'optimizer_fc_dict': self.optimizer_fc.state_dict()},
+                       self.init_save_path)
 
-    # Called after every epoch to print the accuracies, losses, and confusion matrix, and to save the plots
-    def hook_every_epoch(self, epoch):
-        self.store()
-        print(f'Epoch: {epoch+1}')
-        print(
-            f'Train Accuracy: {self.data_storage.train_accuracies[-1]:.2f}%, Train Loss: {self.data_storage.train_losses[-1]:.4f}')
-        print(
-            f'Test Accuracy: {self.data_storage.test_accuracies[-1]:.2f}%, Test Loss: {self.data_storage.test_losses[-1]:.4f}')
-        cm = self._get_predictions_and_labels(self.test_loader)
-        self.plot_confusion_matrix(cm, epoch)
-        print('-' * 50)
 
-    # Visualizes the training and testing accuracies and losses
-    def plot(self):
+        self.scheduler.step()
+        self.scheduler_fc.step()
         
-        epoch = range(1, self.epochs + 1)
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(epoch, self.data_storage.train_accuracies, '-o', color='blue',
-                label='training accuracy')
-        ax.plot(epoch, self.data_storage.test_accuracies, '-o', color='red',
-                label='testing accuracy')
-        ax.set_xlabel('epochs')
-        ax.set_xticks(epoch)
-        ax.set_ylabel('accuracy')
-        ax.set_yticks(range(0, 101, 10))
-        ax.legend()
-        plt.title('training vs testing accuracy')
-        self.figure_storage.store(
-            fig, 'accuracies')
-        plt.show()
+        self.data_storage.dump_store("epochs_gen", self.epoch)
 
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(epoch, self.data_storage.train_losses, '-o', color='blue',
-                label='train loss')
-        ax.plot(epoch, self.data_storage.test_losses, '-o', color='red',
-                label='test loss')
-        ax.set_xlabel('epochs')
-        ax.set_xticks(epoch)
-        ax.set_ylabel('loss')
-        ax.set_yticks(torch.arange(0, 3, 0.2))
-        ax.legend()
-        plt.title('train vs test loss')
-        self.figure_storage.store(
-            fig, 'losses')
-        plt.show()
+        if self.epoch != 0:
+            self.data_storage.dump_store(
+                "learning_rate", self.optimizer.param_groups[0]['lr'])
+            self.data_storage.dump_store(
+                "learning_rate_l", self.optimizer_fc.param_groups[0]['lr'])
+        
+        if sys.platform == "linux":
+            if self.epoch == self.learner_config["num_epochs"] - 1:
+                torch.save({'epoch': self.best_values["Epoch"],
+                            'batch': self.best_values["Batch"],
+                            'test_acc': self.best_values["TestAcc"],
+                            'model_state_dict': self.best_state_dict,
+                            'optimizer_state_dict': self.best_optimizer_dict,
+                            'optimizer_fc_dict': self.best_optimizer_fc_dict},
+                           self.best_save_path)
+                
+                torch.save({'epoch': self.epoch,
+                            'batch': self.batch,
+                            'test_acc': self.test_accuracy,
+                            'model_state_dict': self.model.state_dict(),
+                            'optimizer_state_dict': self.optimizer.state_dict(),
+                            'optimizer_fc_dict': self.optimizer_fc.state_dict()},
+                           self.net_save_path)
+            
+    def _save(self):
+        if self.logging:
+            self.logger.info(
+                "saving the models and values of initial, best and final")
 
-    def confusion_matrix_torch(self, y_true, y_pred, num_classes):
-        cm = torch.zeros((num_classes, num_classes), dtype=torch.long)
-        for t, p in zip(y_true, y_pred):
-            cm[t, p] += 1
-        return cm
+        if sys.platform == "win32":
+            torch.save({'epoch': self.best_values["Epoch"],
+                        'batch': self.best_values["Batch"],
+                        'test_acc': self.best_values["TestAcc"],
+                        'model_state_dict': self.best_state_dict,
+                        'optimizer_state_dict': self.best_optimizer_dict,
+                        'optimizer_fc_dict': self.best_optimizer_fc_dict},
+                       self.best_save_path)
+            
+            torch.save({'epoch': self.epoch,
+                        'batch': self.batch,
+                        'test_acc': self.test_accuracy,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'optimizer_fc_dict': self.optimizer_fc.state_dict()},
+                       self.net_save_path)
 
-    # Returns a confusion matrix for the given data_loader
-    def _get_predictions_and_labels(self, data_loader):
-        all_labels = torch.tensor([], dtype=torch.long)
-        all_predictions = torch.tensor([], dtype=torch.long)
+        self.parameter_storage.store(self.init_values, "initial_values")
+        self.parameter_storage.store(self.best_values, "best_values")
+        self.parameter_storage.store(self.end_values, "end_values")
+        self.parameter_storage.write("\n")
+        
+        torch.save(self.data_storage, os.path.join(self.result_folder, "data_storage.pt"))
+    
+    def _load_initial(self):
+        checkpoint = torch.load(self.initial_save_path)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.eval()
-        with torch.no_grad():
-            for inputs, labels in data_loader:
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
-                outputs = self.model(inputs)
-                _, predicted = torch.max(outputs.data, 1)
-                all_predictions = torch.cat((all_predictions, predicted.cpu()))
-                all_labels = torch.cat((all_labels, labels.cpu()))
-
-        num_classes = len(self.train_loader.dataset.classes)
-        cm = self.confusion_matrix_torch(
-            all_labels, all_predictions, num_classes)
-        return cm
-
-    # Visualizes the confusion matrix for the given epoch
-    def plot_confusion_matrix(self, cm, epoch):
-        cm_normalized = cm / torch.sum(cm, dim=1, keepdim=True)
-        cm_percentage = cm_normalized * 100
-        fig, ax = plt.subplots(figsize=(12, 12))
-
-        # Define custom colormap with specific color shades for each range of values
-        cmap = plt.cm.YlGnBu
-        intervals = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-        bounds = torch.tensor(intervals, dtype=torch.float32)
-        norm = mcolors.BoundaryNorm(bounds, cmap.N)
-
-        cax = ax.matshow(cm_percentage, cmap=cmap, norm=norm)
-        cbar = fig.colorbar(cax, ticks=intervals)
-        cbar.ax.set_yticklabels(intervals)
-
-        # Iterate over the elements of the confusion matrix
-        for i in range(cm_percentage.size(0)):
-            for j in range(cm_percentage.size(1)):
-                z = cm_percentage[i, j]
-                ax.text(j, i, '{:0.1f}'.format(z.item()), ha='center',
-                        va='center', color='white' if z > 50 else 'black')
-
-        ax.set_xlabel('predicted')
-        ax.set_ylabel('true')
-
-        ax.set_xticks(range(10))
-        ax.set_yticks(range(10))
-        ax.set_xticklabels(range(1, 11))
-        ax.xaxis.set_ticks_position('bottom')
-        ax.set_yticklabels(range(1, 11))
-        plt.title('confusion matrix of test data')
-
-        self.figure_storage.store(
-            fig, f'confusion_matrix_epoch_{epoch+1}')
-
-        plt.show()
-
-    def save(self):
-        best_train_accuracy = max(self.data_storage.train_accuracies)
-        best_epoch_train = self.data_storage.train_accuracies.index(best_train_accuracy)
-        best_test_accuracy = max(self.data_storage.test_accuracies)
-        best_epoch_test = self.data_storage.test_accuracies.index(best_test_accuracy)
-        least_train_loss = min(self.data_storage.train_losses)
-        least_loss_epoch_train = self.data_storage.train_losses.index(least_train_loss)
-        least_test_loss = min(self.data_storage.test_losses)
-        least_loss_epoch_test = self.data_storage.test_losses.index(least_test_loss)
-
-        print(f'Best Train Accuracy: {best_train_accuracy:.2f}% (at epoch {best_epoch_train + 1})')
-        print(f'Best Test Accuracy: {best_test_accuracy:.2f}% (at epoch {best_epoch_test + 1})')
-        print(f'Least Train Loss: {least_train_loss:.4f} (at epoch {least_loss_epoch_train + 1})')
-        print(f'Least Test Loss: {least_test_loss:.4f} (at epoch {least_loss_epoch_test + 1})')
-
-
-    def fit(self):
+        return self.model
+    
+    def _load_best(self):
+        checkpoint = torch.load(self.best_save_path)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.eval()
+        return self.model
+    
+    def store_new(self, vals, force=False):
         """
-        trains and evaluates the model for the specified number of epochs. 
-        Calls the hook_every_epoch function after each epoch and evaluates the model after all epochs.
-        """
-        self.batch = 0
-        for epoch in range(self.epochs):
-            self.test_one_epoch()
-            self.train_one_epoch()
-            self.hook_every_epoch(epoch)
-        self.test_one_epoch()
-        self.evaluate()
-        self.save()
+        New store method to replace the default store method for DataStorage.
 
-    # work with this fit
-    # def fit(self):
-    #     self.batch = 0
-    #     for epoch in range(self.epochs):
-    #         self.test()
-    #         self.train()
-    #         self.hook()
-    #         self.plot(iterative=True)
-    #     self.test()
-    #     self.evaluate()
-    #     self.save()
+        Parameters
+        ----------
+        vals : list of values
+            List of values to be stored in the internal 'stored_values'-dictionary.\n
+            Order has to be the same as given during initialization. Best used with \n
+            int, float or torch.Tensor.
+        force : int
+            If given an integer it appends the values with the given batch number.
+
+        Returns
+        -------
+        None.
+
+        """
+        data_storage = self.data_storage  # Reference to data_storage
+        # save time when first storing
+        if data_storage.batch == 0:
+            data_storage.dump_values["TimeStart"] = time.time()
+        if data_storage.batch % data_storage.step == 0 or force > 0:
+            if len(data_storage.stored_values["Time"]) == 0:
+                data_storage.stored_values["Time"] = [
+                    (time.time() - data_storage.dump_values["TimeStart"]) / 60]
+            else:
+                data_storage.stored_values["Time"].append(
+                    (time.time() - data_storage.dump_values["TimeStart"]) / 60.0)
+            for col in range(1, data_storage.columns):
+                name = data_storage.names[col]
+                if name == "a_train_loss":
+                    if len(data_storage.stored_values["train_loss"]) < data_storage.average_window:
+                        avg = torch.mean(torch.Tensor(data_storage.stored_values["train_loss"]))
+                    else:
+                        avg = torch.mean(torch.Tensor(data_storage.stored_values["train_loss"][-data_storage.average_window:]))
+                    data_storage.stored_values[name].append(avg)
+                elif name == "a_train_acc":
+                    if len(data_storage.stored_values["train_acc"]) < data_storage.average_window:
+                        avg = torch.mean(torch.Tensor(data_storage.stored_values["train_acc"]))
+                    else:
+                        avg = torch.mean(torch.Tensor(data_storage.stored_values["train_acc"][-data_storage.average_window:]))
+                    data_storage.stored_values[name].append(avg)
+                else:
+                    if type(vals[col - 1]) == torch.Tensor:
+                        data_storage.stored_values[name].append(
+                            vals[col - 1].cpu().detach().item())
+                    else:
+                        data_storage.stored_values[name].append(vals[col - 1])
+    
+            if data_storage.batch == 0:
+                data_storage._get_head()
+                data_storage._display()
+                print("")
+            else:
+                if data_storage.batch % data_storage.show == 0 or force > 0:
+                    data_storage._display()
+                if data_storage.batch % data_storage.line == 0:
+                    print("")
+                if data_storage.batch % data_storage.header == 0:
+                    data_storage._get_head()
+        data_storage.batch += 1
