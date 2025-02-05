@@ -1,5 +1,5 @@
-# Image-classification-of-Cifar10
+even more stuff
 
-Image Classification of Cifar10 Dataset, PyTorch datasets, data loaders, helpers, learners and augmentations are used and implemented.
-Training the classifiers using convolutional and feedforward neural networks.
-Analysing and explaining the differences of the results.
+some stuff
+
+some other stuff
