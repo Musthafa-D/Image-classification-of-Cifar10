@@ -1,5 +1,1 @@
-even more stuff
-
-some stuff
-
-some other stuff
+Image classification of Cifar10 dataset via PyTorch.
